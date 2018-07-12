@@ -1,0 +1,191 @@
+###############
+#策略：處理日期 
+#月底進隔月出（按提供日期列表(本次列表不精準)
+###############
+library(lubridate)
+library(quantmod)
+library(dplyr)
+par(family = 'STHeiti')
+############### 
+#處理資料
+###############
+wdpath=paste0(getwd(),"/Documents/stock/")
+indateList<-read.csv(paste0(wdpath,"/indate.csv"))
+outdateList<-read.csv(paste0(wdpath,"/outdate.csv"))
+#StockCode <- "GOOGL"
+StockCode <- "2330.TW"
+stockData <- getSymbols(StockCode)
+stockData <- get(stockData)
+
+stockData <- as_data_frame(stockData)
+colnames(stockData) <- c("open", "high", "low", "close", "volume","adjusted") 
+
+indateList$date<-ymd(indateList$date)
+outdateList$date<-ymd(outdateList$date)
+stockData$date <- as.Date(row.names(stockData)) 
+stockData <- stockData %>%
+  select(c(date,open:volume)) %>%
+# 將成交量為0的交易日刪除
+  filter((volume>0)|(!is.na(volume)))  
+#
+stockData <- stockData %>%
+  filter(stockData$date>"2010-01-01")
+
+################
+#處理進場邏輯 26開盤價
+################
+stockData <- stockData %>%
+mutate(
+# 第t-1天收盤價
+  lagClose1=lag(close,1), 
+# 第t-2天收盤價
+  lagClose2=lag(close,2),
+# 第t-1天開盤價
+  lagOpen1=lag(open,1),
+# 第t-2天開盤價
+  lagOpen2=lag(open,2),
+# 第t天的實體K棒長度
+  kbarValue=abs(close-open-1), 
+# 第t-1天的實體K棒長度
+  lagKbarValue1=lag(kbarValue,1),
+# 第t-2天的實體K棒長度
+  lagKbarValue2=lag(kbarValue,2)) 
+
+inSiteTable<-inner_join(indateList, stockData)%>%
+  select(inDate=date, buyPrice=open)
+################
+#處理出場邏輯 06收盤價
+################
+  outSiteTable<-inner_join(outdateList, stockData)%>%
+  select(outDate=date, sellPrice=close)
+################
+#處理交易明細
+################
+# 建立交易明細表
+tradeDetailTable <- NULL   
+for(ix in 1:nrow(inSiteTable)){
+# 目前的進場日期
+  inDate <- inSiteTable$inDate[ix] 
+# 找尋進場日期往後最近的出場位置
+  outSite <- which(outSiteTable$outDate>inDate)[1] 
+# 防呆機制，如果進場日期在資料尾端，有可能發生資料不足找不到出場位置的狀況
+    if(length(outSite)>0){                            
+# 將該筆進場資訊與對應的出場資訊合併，並儲存至交易明細表內
+      tradeDetailTable <- bind_rows(tradeDetailTable, bind_cols(inSiteTable[ix,],outSiteTable[outSite,]))
+   }
+}
+tradeDetailTable <- tradeDetailTable %>%
+  # 將無出場交易日刪除
+  filter(!is.na(outDate)) 
+################
+#計算報酬tradeDetailTable
+################
+buyCostR <- 0.003   # 買入交易成本
+sellCostR <- 0.002  # 賣出交易成本
+tradeDetailTable <- tradeDetailTable %>%
+  mutate(
+# 計算報酬率
+    ret=sellPrice*(1-sellCostR)/(buyPrice*(1+buyCostR))-1,
+# 計算持有日數
+    holdDays=as.numeric(outDate-inDate))
+
+#########
+#D1ShowR <- function(){
+D1ShowR <- function(){
+# 平均報酬率
+meanRet <- mean(tradeDetailTable$ret)
+# 報酬率標準差
+sdRet <- sd(tradeDetailTable$ret) 
+# 交易次數
+tradeNums <- nrow(tradeDetailTable) 
+# 勝率
+winRatio <- sum(as.numeric(tradeDetailTable$ret>0))/tradeNums
+# 最大報酬率
+maxRet <- max(tradeDetailTable$ret)
+# 最小報酬率
+minRet <- min(tradeDetailTable$ret) 
+# 平均持有日數
+avgHoldDays <- mean(tradeDetailTable$holdDays)   
+##############
+cat(paste0("*********","策略回測績效*********\n",
+           
+           "平均報酬率: ",round(meanRet*100,2)," %\n",
+           
+           "交易次數: ",tradeNums," 次\n",
+           
+           "勝率: ",round(winRatio*100,2)," %\n",
+           
+           "報酬率標準差: ",round(sdRet*100,2)," %\n",
+           
+           "最大報酬率: ",round(maxRet*100,2)," %\n",
+           
+           "最小報酬率: ",round(minRet*100,2)," %\n",
+           
+           "平均持有日數: ",round(avgHoldDays,2),"天\n\n"))
+
+}
+##############
+
+stockData <- stockData %>%
+  mutate(
+    MA5=SMA(close,5),     # 5日移動平均線
+    MA20=SMA(close,20),   # 20日移動平均線
+    MA60=SMA(close,60))   # 60日移動平均線
+# # 繪製的交易樣本(在交易明細表列的位置)
+# plotSample <- 2
+
+PlotGraph <- function(plotSample){
+      # 繪製交易樣本的進出場日期
+      inDate <- tradeDetailTable$inDate[plotSample]
+      outDate <- tradeDetailTable$outDate[plotSample]
+      # 繪圖起始日(進場日前35個交易日)，此處用ifelse避免繪製資料超出邊界
+      matchSite <- which(stockData$date==inDate)-35
+      plotStartDate <- stockData$date[ifelse(matchSite<1, 1, matchSite)]                           
+      # 繪圖結束日(出場日後35個交易日)，此處用ifelse避免繪製資料超出邊界
+      matchSite <- which(stockData$date==outDate)+35
+      plotEndDate <- stockData$date[ifelse(matchSite>nrow(stockData), nrow(stockData), matchSite)]
+      # 整理繪製的股價資料期間範圍及欄位資料
+      plotData <- stockData[which((stockData$date>=plotStartDate)&(stockData$date<=plotEndDate)),]
+      # 取出繪圖資料所需的欄位
+      plotData <- plotData %>% select(date:volume, MA5:MA60)
+      # 加入進場位置欄位資訊，用於繪圖時標註進場點位
+      plotData$inSite <- rep(NA, nrow(plotData))
+      plotData$inSite[which(plotData$date==inDate)] <- plotData$open[which(plotData$date==inDate)]*0.95
+      # 加入出場位置欄位資訊，用於繪圖時標註出場點位
+      plotData$outSite <- rep(NA, nrow(plotData))
+      plotData$outSite[which(plotData$date==outDate)] <- plotData$close[which(plotData$date==outDate)]*1.05
+      # 將plotData資料由tibble格式轉為xts格式，符合chart_Series繪圖格式要求
+      plotData <- xts(plotData[,-1], order.by= plotData$date)
+      #
+      # 設定K棒顏色
+      myTheme <- chart_theme()
+      myTheme$col$dn.col <- c("chartreuse3")  # 跌的K棒顏色
+      myTheme$col$up.col <- c("firebrick3")   # 漲的K棒顏色
+      # 繪製各交易日的K棒圖形(主圖)
+      pic <- chart_Series(x=plotData[,1:5], name=paste0(StockCode," 技術分析圖形"), theme=myTheme)
+      # 加入成交量圖形
+      pic <- add_Vo()
+      #指標
+      pic<-add_MACD()
+      pic<-add_RSI(6)
+      
+      #pic<-addRSI()
+      # 加入5日移動平均線
+      pic <- add_TA(x=plotData$MA5, on=1, type="l", col="blue", lwd=1.5)
+      # 加入20日移動平均線
+      pic <- add_TA(x=plotData$MA20, on=1, type="l", col="orange", lwd=1.5)
+      # 加入60日移動平均線
+      pic <- add_TA(x=plotData$MA60, on=1, type="l", col="green", lwd=1.5)
+      # 標註進場位置
+      pic <- add_TA(x=plotData$inSite, on=1, type="p", col="red", pch=2, cex=5, lwd=1.5)
+      # 標註出場位置
+      pic <- add_TA(x=plotData$outSite, on=1, type="p", col="green", pch=6, cex=5, lwd=1.5)
+      
+      #pic<-addBBands()
+      #pic<-addRSI()
+      return(pic)
+  }
+##
+D1ShowR()
+PlotGraph(6)
+
